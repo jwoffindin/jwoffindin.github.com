@@ -1,0 +1,318 @@
+<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+
+  <title><![CDATA[Category: AWS | ^memory^blog]]></title>
+  <link href="http://jwoffindin.github.io/blog/categories/aws/atom.xml" rel="self"/>
+  <link href="http://jwoffindin.github.io/"/>
+  <updated>2013-08-23T17:11:14+12:00</updated>
+  <id>http://jwoffindin.github.io/</id>
+  <author>
+    <name><![CDATA[John Woffindin]]></name>
+    
+  </author>
+  <generator uri="http://octopress.org/">Octopress</generator>
+
+  
+  <entry>
+    <title type="html"><![CDATA[Migrating AWS Images between regions]]></title>
+    <link href="http://jwoffindin.github.io/blog/2013/08/20/migrating-aws-images-between-regions/"/>
+    <updated>2013-08-20T10:10:00+12:00</updated>
+    <id>http://jwoffindin.github.io/blog/2013/08/20/migrating-aws-images-between-regions</id>
+    <content type="html"><![CDATA[<p>We have a project for an Australian client with 3 VPC clusters running in AWS <em>us-west</em>
+region (about 40 servers across test, uat and production).
+With the opening of a Sydney-based data centre, it makes sense to
+migrate to the new location. Unfortunately we run into several issues:</p>
+
+<ul>
+<li>Servers are Oracle Enterprise Linux 5.5. The original AMIs are no longer
+provided by Oracle, and there are no corresponding Kernel (AKI)
+or Ramdisk Image (ARI) in the <code>ap-southeast-2</code>, so using AWS EC2 Copy
+<a href="http://docs.aws.amazon.com/AWSEC2/latest/UserGuide/CopyingAMIs.html">does not work</a></li>
+<li>Images have an unknown amount of customisation applied, so starting
+from scratch isn&rsquo;t an attractive choice if we can avoid it.</li>
+<li>The instances and network configuration were done manually using AWS
+Console, so no artifacts for reuse.</li>
+</ul>
+
+
+<p>First issue, we can&rsquo;t just snapshot/copy the AMIs because we don&rsquo;t have
+matching AKIs/ARIs at the other end.</p>
+
+<p>There are a <a href="http://www.slideshare.net/pleasebiteme/presentation-migrating-aws-ebs-backed-amis-between-regions">couple of presentations</a> which give an introduction to migrating
+instances between regions. This should allow us to migrate the 40+
+servers to the apac data center.</p>
+
+<p>I implemented a basic export/import script that used staging instances.
+The script can be found <a href="git@github.com:jwoffindin/aws-staged-copy.git">here</a></p>
+
+<h3>Create image from snapshot</h3>
+
+<p>architecture <code>x86_64</code>
+pv-grub AMI is <code>aki-3d990e07</code>
+root device is <code>/dev/sda2</code> not <code>/dev/sda1</code></p>
+
+<h3>#</h3>
+
+<p>```bash
+ec2-attach-volume vol-f3c1bdc1 &mdash;instance i-55538e69 &mdash;device /dev/sdk &mdash;region ap-southeast-2</p>
+
+<p>```</p>
+
+<p>On target staging</p>
+
+<p><code>bash
+bash &lt;&lt;EOF
+device=$(cat /proc/partitions | awk '! /xvde/ &amp;&amp; / xvd.[0-9]?/ { print
+$4 ; exit }')
+export chroot=/chroot
+mount /dev/${device}2 ${chroot}
+mount /dev/${device}1 ${chroot}/boot
+for d in /dev /sys /dev/shm /proc ; do mount -o bind $d ${chroot}${d}; done
+</code></p>
+
+<p>```bash</p>
+
+<h1>take 1</h1>
+
+<p>$ sudo -i
+root $ export d=/chroot
+root $ mkdir $d
+root $ mount -o bind /dev $d/dev
+root $ mount -o bind /sys $d/sys
+root $ mount -o bind /dev/shm $d/dev/shm
+root $ mount -o bind /proc $d/proc
+root $ chroot /chroot
+root $ /sbin/mkinitrd -f -v  &mdash;builtin uhci-hcd &mdash;builtin ohci-hcd &mdash;builtin \
+ ehci-hcd &mdash;preload xennet &mdash;preload xenblk &mdash;preload dm-mod &mdash;preload \
+ linear /initrd-2.6.18-194.0.0.0.3.el5xen.img \
+ 2.6.18-194.0.0.0.3.el5xen
+root $ exit
+```</p>
+
+<p>tidy up</p>
+
+<p><code>bash
+[root@ip-10-240-10-89 ~]# for mount in /dev/shm /dev /proc /sys /boot / ; do umount ${d}${mount} ; done
+</code></p>
+
+<p>Detaach the volume and create a snapshot</p>
+
+<p><code>bash
+$ REGION=ap-southeast-2
+$ ZONE=${REGION}b
+$ ec2-detach-volume vol-f3c1bdc1 --region ${REGION}
+$ ec2-create-snapshot vol-f3c1bdc1 --region ${REGION}
+$ SNAP=snap-468d4475
+</code></p>
+
+<p>Wait for it to become available</p>
+
+<p><code>bash
+$ ec2-describe-snapshots ${SNAP} --region ${REGION}
+</code></p>
+
+<p>and
+<code>
+$ ec2-register --region ${REGION} --name "Test Image" --description "Created for testing migration " \
+--architecture x86_64 --kernel aki-3d990e07 --root-device-name /dev/sda1 -s ${SNAP}
+</code></p>
+
+<p>Launch the instance
+<code>bash
+$ ec2-run-instances --region ${REGION} ami-890a98b3
+</code></p>
+
+<p>Wait for it
+<code>
+$ INSTANCE_ID=i-a82cf294
+ec2-get-console-output --region ${REGION} ${INSTANCE_ID} | less
+</code></p>
+
+<p>crap.</p>
+
+<h3>Plan B : Try as a single image, i.e. boot off /dev/sda rather than partition</h3>
+
+<p>The original image had 3 partitions:</p>
+
+<ul>
+<li><code>/boot</code> on <code>/dev/sda1</code></li>
+<li><code>/</code> on <code>/dev/sda2</code></li>
+<li>swap on <code>/dev/sda3</code></li>
+</ul>
+
+
+<p>Start from a fresh copy, create a volume from copied snapshot:</p>
+
+<p>```bash
+$ export SNAP=snap-8faa63bc
+$ ec2-create-volume &mdash;snapshot ${SNAP} -z ${REGION}b</p>
+
+<h1>This is our source 3-partition image migrated</h1>
+
+<p>$ VOLUME_ID=vol-ee146fdc
+$ ec2-describe-volumes ${VOLUME_ID}
+$ ec2-attach-volume ${VOLUME_ID} &mdash;instance i-55538e69 &mdash;device /dev/sdk
+```</p>
+
+<p>Create volume which will be standalone. Note that the volume must not be
+smaller than the original filesystem otherwise <code>partimage</code> will coredump.</p>
+
+<p><code>
+$ ec2-create-volume -z ${ZONE} -s 11
+$ VOLUME_ID=vol-a3097291 # copy &amp; paste job
+$ ec2-attach-volume ${VOLUME_ID} --instance i-55538e69 --device /dev/sdl
+</code></p>
+
+<h3>Create EBS volume with single filesytem</h3>
+
+<p>On the staging box we export from /dev/sda2 (/xvdo2) to newly minted
+EBS volume.</p>
+
+<p>Dump the root partition to a file using partimage (which is faster than
+doing plain <code>dd</code> as it only copies used blocks in the filesystem)</p>
+
+<p><code>bash
+% e2fsck /dev/xvdo2
+% partimage -B=N  -z1 -d save /dev/xvdo2 /tmp/xvdo.partimg.gz -o -m -M
+partimage: status: initializing the operation.
+partimage: status: Saving partition to the image file...
+partimage: status: reading partition properties
+partimage: status: checking the file system with fsck
+partimage: status: writing header
+partimage: status: copying used data blocks
+partimage: status: commiting buffer cache to disk.
+partimage: Success [OK]
+partimage:  Operation successfully finished:
+Time elapsed: 11m:13sec
+Speed: 232.90 MiB/min
+Data copied: 2.55 GiB
+</code></p>
+
+<p>Then we copy the image onto new EBS volume.</p>
+
+<p><code>
+% partimage restore /dev/xvdp /tmp/xvdo.partimg.gz.000 -f3 -B=N
+partimage: status: initializing the operation
+partimage: status: Restoring partition from the image file...
+partimage: status: reading partition informations
+partimage: status: reading header
+partimage: status: copying used data blocks
+partimage: status: commiting buffer cache to disk.
+</code></p>
+
+<p>and then prepare the new volume for booting. We need to fix the
+grub menu and fstab.</p>
+
+<p>```bash
+$ mount /dev/xvdp /mnt
+$ cp menu.lst.template /mnt/tmp
+$ sudo chroot /mnt
+% export version=2.6.18-194.0.0.0.3.el5xen
+% cat /tmp/menu.lst.template | sed &rsquo;s/${version}/&lsquo;${version}/g > /boot/grub/menu.lst
+% cat /boot/grub/menu.lst
+default 0
+timeout 1
+title Test Server</p>
+
+<pre><code>    root (hd0)
+    kernel /vmlinuz-2.6.18-194.0.0.0.3.el5xen ro root=LABEL=/
+    initrd /initrd-2.6.18-194.0.0.0.3.el5xen.img
+</code></pre>
+
+<h1>/sbin/mkinitrd -f -v  &mdash;builtin uhci-hcd &mdash;builtin ohci-hcd \</h1>
+
+<p>&mdash;builtin ehci-hcd &mdash;preload xennet &mdash;preload xenblk &mdash;preload dm-mod \
+&mdash;preload linear /initrd-${version}.img ${version} \</p>
+
+<h1>vi /etc/fstab</h1>
+
+<p>/dev/sda               /                       ext3    defaults        1 1
+tmpfs                   /dev/shm                tmpfs   defaults 0 0
+devpts                  /dev/pts                devpts  gid=5,mode=620 0 0
+sysfs                   /sys                    sysfs   defaults 0 0
+proc                    /proc                   proc    defaults 0 0</p>
+
+<h1>exit</h1>
+
+<p>$ sudo umount /mnt
+```</p>
+
+<p><code>bash
+$ ec2-detach-volume ${VOLUME_ID}
+$ ec2-create-snapshot ${VOLUME_ID}
+$ SNAP=snap-468d4475
+$ ec2-describe-snapshots ${SNAP}
+$ ec2-register --name "Single filesystem image" --architecture x86_64 --kernel aki-31990e0b --root-device-name /dev/sda -s ${SNAP}
+$ TEST_AMI=ami-b1089a8b
+$ ec2-run-instances ${TEST_AMI}
+$ TEST_I=i-6401fb58
+$ ec2-describe-instance-status ${TEST_I}
+$ ec2-get-console-output ${TEST_I}
+</code></p>
+
+<p>If all is good:</p>
+
+<p>```
+Enterprise Linux Enterprise Linux Server release 5.5 (Carthage)
+Kernel 2.6.18-194.0.0.0.3.el5xen on an x86_64</p>
+
+<p>localhost.localdomain login:
+```</p>
+
+<p>Cleanup:</p>
+
+<p><code>bash
+$ ec2-terminate-instances  ${TEST_I}
+$ ec2-deregister ${TEST_AMI}
+$ ec2-delete-snapshot ${SNAP}
+</code></p>
+
+<h2>Old stuff &ndash; to be cleaned up.</h2>
+
+<p>Describing migration approach</p>
+
+<p>I started two instances in <code>us-east-1</code> as a trial using <code>ami-63d2130a</code> AMI Oracle Linux
+5.5 x86_64. One will be the image we want to migrate, the other is the
+&ldquo;helper&rdquo; box that will be used for the migration.</p>
+
+<p><code>bash
+$ mkdir -m 0700 ~/.ssh/aws
+$ cp ~/Downloads/orel-migration-test.pem ~/.ssh/aws
+$ chmod 0600 ~/.ssh/aws/*
+</code></p>
+
+<p>add following <code>~/.ssh/config</code> entries.</p>
+
+<p>```</p>
+
+<h1>Instance i-585c3f30</h1>
+
+<p>host box-1.source
+  Hostname ec2-184-73-48-11.compute-1.amazonaws.com
+  User root
+  IdentityFile ~/.ssh/aws/orel-migration-test.pem
+  PreferredAuthentications publickey</p>
+
+<h1>Instance i-5a5c3f32</h1>
+
+<p>host staging.source
+  Hostname ec2-54-211-116-254.compute-1.amazonaws.com
+  User root
+  IdentityFile ~/.ssh/aws/orel-migration-test.pem
+  PreferredAuthentications publickey
+```</p>
+
+<p>Check connectivity</p>
+
+<p><code>bash
+$ ssh box-1.source echo okay
+...
+okay
+$ ssh staging.source echo okay
+...
+okay
+</code></p>
+]]></content>
+  </entry>
+  
+</feed>
