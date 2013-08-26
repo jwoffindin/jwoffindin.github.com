@@ -4,7 +4,7 @@
   <title><![CDATA[Category: AWS | ^memory^blog]]></title>
   <link href="http://jwoffindin.github.io/blog/categories/aws/atom.xml" rel="self"/>
   <link href="http://jwoffindin.github.io/"/>
-  <updated>2013-08-23T17:11:14+12:00</updated>
+  <updated>2013-08-26T16:49:56+12:00</updated>
   <id>http://jwoffindin.github.io/</id>
   <author>
     <name><![CDATA[John Woffindin]]></name>
@@ -18,38 +18,134 @@
     <link href="http://jwoffindin.github.io/blog/2013/08/20/migrating-aws-images-between-regions/"/>
     <updated>2013-08-20T10:10:00+12:00</updated>
     <id>http://jwoffindin.github.io/blog/2013/08/20/migrating-aws-images-between-regions</id>
-    <content type="html"><![CDATA[<p>We have a project for an Australian client with 3 VPC clusters running in AWS <em>us-west</em>
+    <content type="html"><![CDATA[<p><strong>Diclaimer: This post is a work in progress. It&rsquo;s disorganised and any
+commands presented below are likey to destroy your production database,
+so take the following with a large grain of salt</strong></p>
+
+<p>Problem: We have AWS VPC networks running in AWS <em>us-west</em>
 region (about 40 servers across test, uat and production).
 With the opening of a Sydney-based data centre, it makes sense to
-migrate to the new location. Unfortunately we run into several issues:</p>
+migrate to the new location.</p>
 
-<ul>
-<li>Servers are Oracle Enterprise Linux 5.5. The original AMIs are no longer
+<p>Servers are Oracle Enterprise Linux 5.5. The original AMIs are no longer
 provided by Oracle, and there are no corresponding Kernel (AKI)
 or Ramdisk Image (ARI) in the <code>ap-southeast-2</code>, so using AWS EC2 Copy
-<a href="http://docs.aws.amazon.com/AWSEC2/latest/UserGuide/CopyingAMIs.html">does not work</a></li>
-<li>Images have an unknown amount of customisation applied, so starting
-from scratch isn&rsquo;t an attractive choice if we can avoid it.</li>
-<li>The instances and network configuration were done manually using AWS
-Console, so no artifacts for reuse.</li>
-</ul>
+<a href="http://docs.aws.amazon.com/AWSEC2/latest/UserGuide/CopyingAMIs.html">does not work</a>.</p>
 
+<p>Fortunately Sydney supports <a href="http://wiki.xen.org/wiki/PvGrub">pv-grub</a> so I&rsquo;m documenting my feable
+attempts at migrating bootable images across</p>
+
+<h2>Migrating Root Images</h2>
 
 <p>First issue, we can&rsquo;t just snapshot/copy the AMIs because we don&rsquo;t have
 matching AKIs/ARIs at the other end.</p>
 
 <p>There are a <a href="http://www.slideshare.net/pleasebiteme/presentation-migrating-aws-ebs-backed-amis-between-regions">couple of presentations</a> which give an introduction to migrating
 instances between regions. This should allow us to migrate the 40+
-servers to the apac data center.</p>
-
-<p>I implemented a basic export/import script that used staging instances.
+servers to the apac data center.<br/>
+I implemented a basic export/import script that used staging instances.
 The script can be found <a href="git@github.com:jwoffindin/aws-staged-copy.git">here</a></p>
 
-<h3>Create image from snapshot</h3>
+<p><em>Update</em>: We should just be able to snapshot the EBS root volume and use
+the copy snapshot approach. Will update once I&rsquo;ve tried this.</p>
 
-<p>architecture <code>x86_64</code>
-pv-grub AMI is <code>aki-3d990e07</code>
-root device is <code>/dev/sda2</code> not <code>/dev/sda1</code></p>
+<h2>Booting Migrated Volumes</h2>
+
+<p>Once we have root EBS snapshots migrated, high-level steps we need to go
+through are:</p>
+
+<ol>
+<li>Prepare a &lsquo;staging&rsquo; server in the target availability zone</li>
+<li>Create a Volume from copied snapshot</li>
+<li>Make any requires changes to the file system by mounting it on the
+staging server</li>
+<li>Unmount and snapshot the Volume</li>
+<li>Create an AMI from the snapshot, setting the appropriate
+architecture, and <em>pv-grub</em> enabled AKI.</li>
+<li>Boot the instance.</li>
+<li>Check the console log to see if blows up somewhere along the way</li>
+</ol>
+
+
+<p>If it fails, then terminate the instance, delete the snapshot and AMI
+that we created in steps 4 onwards.</p>
+
+<h3>Tooling</h3>
+
+<p>I&rsquo;m on OS/X using Boxen / Brew to install api/ami tools, but an <code>apt-get</code>
+should work just as well. See <a href="http://docs.aws.amazon.com/AWSEC2/latest/CommandLineReference/Welcome.html">AWS Documentation</a> for the official
+documentation.</p>
+
+<p><code>bash
+$ sudo apt-get install ec2-api-tools ec2-ami-tools
+$ brew install ec2-api-tools ec2-ami-tools
+</code></p>
+
+<p>You will need to setup your AWS credentials for the ec2 tools to work.
+I&rsquo;m using the following simple shell script to set environment variables
+required:</p>
+
+<p><code>bash env.sh
+$ export EC2_CERT=~/.ec2/cert.pem
+$ export EC2_PRIVATE_KEY=~/.ec2/private-key.pem
+$ export JAVA_HOME="$(/usr/libexec/java_home)"
+$ export EC2_HOME="/opt/boxen/homebrew/Library/LinkedKegs/ec2-api-tools/jars"
+</code></p>
+
+<p>In addition, also explicitly setting EC2_URL to the <em>ap-southeast-2</em>
+endpoint to avoid having to always specify the <code>--region</code> parameter.</p>
+
+<p><code>bash
+$ export EC2_URL=https://ec2.ap-southeast-2.amazonaws.com/
+</code></p>
+
+<h3>Selecting correct AMI</h3>
+
+<p>I&rsquo;ve stumbled across <a href="/downloads/documents/convert-to-pv-grub.docx">this document</a> which lists the
+available pv-grub AKIs by region and disk layout. I&rsquo;m not sure who the
+original author was, apologies!</p>
+
+<p>For this case (root on <code>/dev/sda2</code>, and <em>ap-southeast-2</em> region), I will be using:</p>
+
+<table>
+<thead>
+<tr>
+<th> property       </th>
+<th> value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> architecture   </td>
+<td> <code>x86_64</code></td>
+</tr>
+<tr>
+<td> pv-grub AKI    </td>
+<td> <code>aki-3d990e07</code></td>
+</tr>
+</tbody>
+</table>
+
+
+<h3>Preparing the image</h3>
+
+<p>Assuming you have a snapshot <code>$SNAP_ID</code> and your staging instance-id
+<code>$STAGING_INSTANCE_ID</code>, then the following will create a new volume
+and mount it on your staging server.</p>
+
+<p>I&rsquo;ve written a small/dumb script for creating the volume and attaching
+it to the staging instance. It can be found <a href="https://gist.github.com/jwoffindin/6337827">here</a></p>
+
+<p><code>bash Create and attach volume
+$ ./create-volume-and-snapshot.sh snap-XXXXX i-YYYYYYY
+</code></p>
+
+<p>TODO: Put instructions on making the image bootable</p>
+
+<h3>Try it out</h3>
+
+<p>The next <a href="https://gist.github.com/6338180">script</a> will create an AMI
+from the candidate volume and boot it.</p>
 
 <h3>#</h3>
 
@@ -62,8 +158,7 @@ ec2-attach-volume vol-f3c1bdc1 &mdash;instance i-55538e69 &mdash;device /dev/sdk
 
 <p><code>bash
 bash &lt;&lt;EOF
-device=$(cat /proc/partitions | awk '! /xvde/ &amp;&amp; / xvd.[0-9]?/ { print
-$4 ; exit }')
+device=$(cat /proc/partitions | awk '! /xvde/ &amp;&amp; / xvd.[0-9]?/ { print $4 ; exit }')
 export chroot=/chroot
 mount /dev/${device}2 ${chroot}
 mount /dev/${device}1 ${chroot}/boot
