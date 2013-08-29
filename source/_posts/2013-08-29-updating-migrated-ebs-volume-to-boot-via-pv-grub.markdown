@@ -1,6 +1,6 @@
 ---
 layout: post
-title: ""Updating Migrated EBS volume to boot via pv-grub""
+title: "Updating Migrated EBS volume to boot via pv-grub"
 date: 2013-08-29 16:04
 comments: true
 categories: AWS
