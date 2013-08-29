@@ -74,7 +74,7 @@ commands presented below are likey to destroy your production database, &hellip;
       
   <header>
     
-      <h1 class="entry-title"><a href="/blog/2013/08/20/migrating-aws-images-between-regions/">Migrating AWS Images Between Regions</a></h1>
+      <h1 class="entry-title"><a href="/blog/2013/08/20/migrating-aws-images-between-regions/">Migrating a AWS VPC Between Regions - Part 1</a></h1>
     
     
       <p class="meta">
@@ -101,16 +101,18 @@ commands presented below are likey to destroy your production database, &hellip;
 commands presented below are likey to destroy your production database,
 so take the following with a large grain of salt</strong></p>
 
-<p>The following describes the process for migrating AWS-based VPC
-instances from US region to AU and using CloudFormation for
-setting up VPC.</p>
+<p>This is first part of a series that describes the process I went through
+migrating AWS-based VPC instances from US region to AU and using
+CloudFormation for setting up VPC. It is also an excuse to finally start
+a blog and kick the tires of <a href="http://octopress.org/">Octopress</a>.</p>
 
 <h2>Background</h2>
 
-<p>Servers are Oracle Enterprise Linux 5.5. The original AMIs are no longer
-provided by Oracle, and there are no corresponding Kernel (AKI)
-or Ramdisk Image (ARI) in the <code>ap-southeast-2</code> region, so using AWS EC2 Copy
-<a href="http://docs.aws.amazon.com/AWSEC2/latest/UserGuide/CopyingAMIs.html">does not work</a>.</p>
+<p>We have two VPC networks on AWS with servers split across several
+subnets. OS is Oracle Enterprise Linux 5.5. The original AMIs are no
+longer provided by Oracle, and there are no corresponding Kernel (AKI)
+or Ramdisk Image (ARI) in the <code>ap-southeast-2</code> region, so using AWS EC2
+Copy [does not work][1].</p>
 
 <p>Fortunately the target region supports <a href="http://wiki.xen.org/wiki/PvGrub">pv-grub</a> so the migration will
 will also include making migrated server bootable via pv-grub.</p>
@@ -118,523 +120,52 @@ will also include making migrated server bootable via pv-grub.</p>
 <p>So, the plan is to:</p>
 
 <ol>
-<li>Define migration strategy and set up any required infrastructure to
-migrate server instances between regions.</li>
-<li>Write scripts to copy system volumes across and make them bootable in
+<li>Write script to copy root and data EBS volumes to the &ldquo;target&rdquo;
+region.</li>
+<li>Update these copied root volumes to make then bootable under pv-grub
 the target region. Each server has an unknown set of changes made so
 we must migrate all instances.</li>
-<li>Migrate data volumes into the new region and record sufficient
-information so they are mounted onto the correct target volume. We
-also need to be aware of any application-level consistency problems
-when snapshotting the filesystem.</li>
 <li>Create a CloudFormation template referencing migrated AMIs so
 instances are created in the correct subnets and correct data volumes
-are mounted.</li>
-<li>Boot network and test</li>
+are mounted on the correct hosts.</li>
+<li>Create the server instances using CloudFormation and test</li>
 <li>Clean up after ourselves.</li>
 </ol>
 
 
+<p>The first step is straight forward so I&rsquo;ll cover it here. The remaining
+activities will be covered in their own posts.</p>
+
 <h2>Migrating Root Images</h2>
 
-<p>Below is a simple ZSH script which can be used to migrate root EBS
-volumes from one region to another.</p>
+<p>Each of the instances has two EBS volumes &ndash; a <em>system</em> EBS volume
+(containing the root and boot partitions) and a <em>data</em> volume. The
+system volume is a disk image with 3 parititons:</p>
+
+<ul>
+<li><code>/dev/sda1</code> &ndash; the <code>/boot</code> volume</li>
+<li><code>/dev/sda1</code> &ndash; the root volume (mounted as &lsquo;/&rsquo;)</li>
+<li><code>/dev/sda3</code> &ndash; swap (more on this one later)</li>
+</ul>
+
+
+<p>Below is a simple ZSH script I wrote to migrate root EBS
+volumes from one region to another. It sputs out a CSV file
+which we&rsquo;ll need later to correlate the migrated instances against the
+original instance ids.</p>
 
 <div><script src='https://gist.github.com/6373731.js'></script>
 <noscript><pre><code></code></pre></noscript></div>
 
 
-<p>Creating snapshots is a bit tricky since the OREL 5.5
+<p>The current version only migrates the root images, will update later
+with something a bit smarter.</p>
+
+<p>Note that snapshotting the filesystems is a bit tricky since the OREL 5.5
 systems aren&rsquo;t using LVM and don&rsquo;t support [fsfreeze].
-The script will remount the root filesystem read-only, trigger ec2
-snapshot and then remount as writable.</p>
-
-<h2>Booting Migrated Volumes</h2>
-
-<p>Once we have root EBS snapshots migrated, high-level steps we need to go
-through are:</p>
-
-<ol>
-<li>Prepare a &lsquo;staging&rsquo; server in the target availability zone</li>
-<li>Create a Volume from copied snapshot</li>
-<li>Make any requires changes to the file system by mounting it on the
-staging server</li>
-<li>Unmount and snapshot the Volume</li>
-<li>Create an AMI from the snapshot, setting the appropriate
-architecture, and <em>pv-grub</em> enabled AKI.</li>
-<li>Boot the instance.</li>
-<li>Check the console log to see if blows up somewhere along the way</li>
-</ol>
-
-
-<p>If it fails, then terminate the instance, delete the snapshot and AMI
-that we created in steps 4 onwards.</p>
-
-<h3>Tooling</h3>
-
-<p>I&rsquo;m on OS/X using Boxen / Brew to install api/ami tools, but an <code>apt-get</code>
-should work just as well. See <a href="http://docs.aws.amazon.com/AWSEC2/latest/CommandLineReference/Welcome.html">AWS Documentation</a> for the official
-documentation.</p>
-
-<figure class='code'><figcaption><span></span></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class='line-number'>1</span>
-<span class='line-number'>2</span>
-</pre></td><td class='code'><pre><code class='bash'><span class='line'><span class="nv">$ </span>sudo apt-get install ec2-api-tools ec2-ami-tools
-</span><span class='line'><span class="nv">$ </span>brew install ec2-api-tools ec2-ami-tools
-</span></code></pre></td></tr></table></div></figure>
-
-
-<p>You will need to setup your AWS credentials for the ec2 tools to work.
-I&rsquo;m using the following simple shell script to set environment variables
-required:</p>
-
-<figure class='code'><figcaption><span>env.sh</span></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class='line-number'>1</span>
-<span class='line-number'>2</span>
-<span class='line-number'>3</span>
-<span class='line-number'>4</span>
-</pre></td><td class='code'><pre><code class='bash'><span class='line'><span class="nv">$ </span><span class="nb">export </span><span class="nv">EC2_CERT</span><span class="o">=</span>~/.ec2/cert.pem
-</span><span class='line'><span class="nv">$ </span><span class="nb">export </span><span class="nv">EC2_PRIVATE_KEY</span><span class="o">=</span>~/.ec2/private-key.pem
-</span><span class='line'><span class="nv">$ </span><span class="nb">export </span><span class="nv">JAVA_HOME</span><span class="o">=</span><span class="s2">&quot;$(/usr/libexec/java_home)&quot;</span>
-</span><span class='line'><span class="nv">$ </span><span class="nb">export </span><span class="nv">EC2_HOME</span><span class="o">=</span><span class="s2">&quot;/opt/boxen/homebrew/Library/LinkedKegs/ec2-api-tools/jars&quot;</span>
-</span></code></pre></td></tr></table></div></figure>
-
-
-<p>In addition, also explicitly setting EC2_URL to the <em>ap-southeast-2</em>
-endpoint to avoid having to always specify the <code>--region</code> parameter.</p>
-
-<figure class='code'><figcaption><span></span></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class='line-number'>1</span>
-</pre></td><td class='code'><pre><code class='bash'><span class='line'><span class="nv">$ </span><span class="nb">export </span><span class="nv">EC2_URL</span><span class="o">=</span>https://ec2.ap-southeast-2.amazonaws.com/
-</span></code></pre></td></tr></table></div></figure>
-
-
-<h3>Selecting correct AMI</h3>
-
-<p>I&rsquo;ve stumbled across <a href="/downloads/documents/convert-to-pv-grub.docx">this document</a> which lists the
-available pv-grub AKIs by region and disk layout. I&rsquo;m not sure who the
-original author was, apologies!</p>
-
-<p>For this case (root on <code>/dev/sda2</code>, and <em>ap-southeast-2</em> region), I will be using:</p>
-
-<table>
-<thead>
-<tr>
-<th> property       </th>
-<th> value</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td> architecture   </td>
-<td> <code>x86_64</code></td>
-</tr>
-<tr>
-<td> pv-grub AKI    </td>
-<td> <code>aki-3d990e07</code></td>
-</tr>
-</tbody>
-</table>
-
-
-<h3>Preparing the image</h3>
-
-<p>Assuming you have a snapshot <code>$SNAP_ID</code> and your staging instance-id
-<code>$STAGING_INSTANCE_ID</code>, then the following will create a new volume
-and mount it on your staging server.</p>
-
-<p>I&rsquo;ve written a small/dumb script for creating the volume and attaching
-it to the staging instance. It can be found <a href="https://gist.github.com/jwoffindin/6337827">here</a></p>
-
-<figure class='code'><figcaption><span>Create and attach volume</span></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class='line-number'>1</span>
-</pre></td><td class='code'><pre><code class='bash'><span class='line'><span class="nv">$ </span>./create-volume-and-snapshot.sh snap-XXXXX i-YYYYYYY
-</span></code></pre></td></tr></table></div></figure>
-
-
-<p>TODO: Put instructions on making the image bootable</p>
-
-<h3>Try it out</h3>
-
-<p>The next <a href="https://gist.github.com/6338180">script</a> will create an AMI
-from the candidate volume and boot it.</p>
-
-<h3>#</h3>
-
-<figure class='code'><figcaption><span></span></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class='line-number'>1</span>
-</pre></td><td class='code'><pre><code class='bash'><span class='line'>ec2-attach-volume vol-f3c1bdc1 --instance i-55538e69 --device /dev/sdk --region ap-southeast-2
-</span></code></pre></td></tr></table></div></figure>
-
-
-<p>On target staging</p>
-
-<figure class='code'><figcaption><span></span></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class='line-number'>1</span>
-<span class='line-number'>2</span>
-<span class='line-number'>3</span>
-<span class='line-number'>4</span>
-<span class='line-number'>5</span>
-<span class='line-number'>6</span>
-</pre></td><td class='code'><pre><code class='bash'><span class='line'>bash &lt;&lt;EOF
-</span><span class='line'><span class="nv">device</span><span class="o">=</span><span class="k">$(</span>cat /proc/partitions | awk <span class="s1">&#39;! /xvde/ &amp;&amp; / xvd.[0-9]?/ { print $4 ; exit }&#39;</span><span class="k">)</span>
-</span><span class='line'><span class="nb">export </span><span class="nv">chroot</span><span class="o">=</span>/chroot
-</span><span class='line'>mount /dev/<span class="k">${</span><span class="nv">device</span><span class="k">}</span>2 <span class="k">${</span><span class="nv">chroot</span><span class="k">}</span>
-</span><span class='line'>mount /dev/<span class="k">${</span><span class="nv">device</span><span class="k">}</span>1 <span class="k">${</span><span class="nv">chroot</span><span class="k">}</span>/boot
-</span><span class='line'><span class="k">for </span>d in /dev /sys /dev/shm /proc ; <span class="k">do </span>mount -o <span class="nb">bind</span> <span class="nv">$d</span> <span class="k">${</span><span class="nv">chroot</span><span class="k">}${</span><span class="nv">d</span><span class="k">}</span>; <span class="k">done</span>
-</span></code></pre></td></tr></table></div></figure>
-
-
-
-
-<figure class='code'><figcaption><span></span></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class='line-number'>1</span>
-<span class='line-number'>2</span>
-<span class='line-number'>3</span>
-<span class='line-number'>4</span>
-<span class='line-number'>5</span>
-<span class='line-number'>6</span>
-<span class='line-number'>7</span>
-<span class='line-number'>8</span>
-<span class='line-number'>9</span>
-<span class='line-number'>10</span>
-<span class='line-number'>11</span>
-<span class='line-number'>12</span>
-<span class='line-number'>13</span>
-<span class='line-number'>14</span>
-</pre></td><td class='code'><pre><code class='bash'><span class='line'><span class="c"># take 1</span>
-</span><span class='line'><span class="nv">$ </span>sudo -i
-</span><span class='line'>root <span class="nv">$ </span><span class="nb">export </span><span class="nv">d</span><span class="o">=</span>/chroot
-</span><span class='line'>root <span class="nv">$ </span>mkdir <span class="nv">$d</span>
-</span><span class='line'>root <span class="nv">$ </span>mount -o <span class="nb">bind</span> /dev <span class="nv">$d</span>/dev
-</span><span class='line'>root <span class="nv">$ </span>mount -o <span class="nb">bind</span> /sys <span class="nv">$d</span>/sys
-</span><span class='line'>root <span class="nv">$ </span>mount -o <span class="nb">bind</span> /dev/shm <span class="nv">$d</span>/dev/shm
-</span><span class='line'>root <span class="nv">$ </span>mount -o <span class="nb">bind</span> /proc <span class="nv">$d</span>/proc
-</span><span class='line'>root <span class="nv">$ </span>chroot /chroot
-</span><span class='line'>root <span class="nv">$ </span>/sbin/mkinitrd -f -v  --builtin uhci-hcd --builtin ohci-hcd --builtin <span class="se">\</span>
-</span><span class='line'> ehci-hcd --preload xennet --preload xenblk --preload dm-mod --preload <span class="se">\</span>
-</span><span class='line'> linear /initrd-2.6.18-194.0.0.0.3.el5xen.img <span class="se">\</span>
-</span><span class='line'> 2.6.18-194.0.0.0.3.el5xen
-</span><span class='line'>root <span class="nv">$ </span><span class="nb">exit</span>
-</span></code></pre></td></tr></table></div></figure>
-
-
-<p>tidy up</p>
-
-<figure class='code'><figcaption><span></span></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class='line-number'>1</span>
-</pre></td><td class='code'><pre><code class='bash'><span class='line'><span class="o">[</span>root@ip-10-240-10-89 ~<span class="o">]</span><span class="c"># for mount in /dev/shm /dev /proc /sys /boot / ; do umount ${d}${mount} ; done</span>
-</span></code></pre></td></tr></table></div></figure>
-
-
-<p>Detaach the volume and create a snapshot</p>
-
-<figure class='code'><figcaption><span></span></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class='line-number'>1</span>
-<span class='line-number'>2</span>
-<span class='line-number'>3</span>
-<span class='line-number'>4</span>
-<span class='line-number'>5</span>
-</pre></td><td class='code'><pre><code class='bash'><span class='line'><span class="nv">$ REGION</span><span class="o">=</span>ap-southeast-2
-</span><span class='line'><span class="nv">$ ZONE</span><span class="o">=</span><span class="k">${</span><span class="nv">REGION</span><span class="k">}</span>b
-</span><span class='line'><span class="nv">$ </span>ec2-detach-volume vol-f3c1bdc1 --region <span class="k">${</span><span class="nv">REGION</span><span class="k">}</span>
-</span><span class='line'><span class="nv">$ </span>ec2-create-snapshot vol-f3c1bdc1 --region <span class="k">${</span><span class="nv">REGION</span><span class="k">}</span>
-</span><span class='line'><span class="nv">$ SNAP</span><span class="o">=</span>snap-468d4475
-</span></code></pre></td></tr></table></div></figure>
-
-
-<p>Wait for it to become available</p>
-
-<figure class='code'><figcaption><span></span></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class='line-number'>1</span>
-</pre></td><td class='code'><pre><code class='bash'><span class='line'><span class="nv">$ </span>ec2-describe-snapshots <span class="k">${</span><span class="nv">SNAP</span><span class="k">}</span> --region <span class="k">${</span><span class="nv">REGION</span><span class="k">}</span>
-</span></code></pre></td></tr></table></div></figure>
-
-
-<p>and</p>
-
-<figure class='code'><figcaption><span></span></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class='line-number'>1</span>
-<span class='line-number'>2</span>
-</pre></td><td class='code'><pre><code class='bash'><span class='line'><span class="nv">$ </span>ec2-register --region <span class="k">${</span><span class="nv">REGION</span><span class="k">}</span> --name <span class="s2">&quot;Test Image&quot;</span> --description <span class="s2">&quot;Created for testing migration &quot;</span> <span class="se">\</span>
-</span><span class='line'>--architecture x86_64 --kernel aki-3d990e07 --root-device-name /dev/sda1 -s <span class="k">${</span><span class="nv">SNAP</span><span class="k">}</span>
-</span></code></pre></td></tr></table></div></figure>
-
-
-<p>Launch the instance</p>
-
-<figure class='code'><figcaption><span></span></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class='line-number'>1</span>
-</pre></td><td class='code'><pre><code class='bash'><span class='line'><span class="nv">$ </span>ec2-run-instances --region <span class="k">${</span><span class="nv">REGION</span><span class="k">}</span> ami-890a98b3
-</span></code></pre></td></tr></table></div></figure>
-
-
-<p>Wait for it</p>
-
-<figure class='code'><figcaption><span></span></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class='line-number'>1</span>
-<span class='line-number'>2</span>
-</pre></td><td class='code'><pre><code class='bash'><span class='line'><span class="nv">$ INSTANCE_ID</span><span class="o">=</span>i-a82cf294
-</span><span class='line'>ec2-get-console-output --region <span class="k">${</span><span class="nv">REGION</span><span class="k">}</span> <span class="k">${</span><span class="nv">INSTANCE_ID</span><span class="k">}</span> | less
-</span></code></pre></td></tr></table></div></figure>
-
-
-<p>crap.</p>
-
-<h3>Plan B : Try as a single image, i.e. boot off /dev/sda rather than partition</h3>
-
-<p>The original image had 3 partitions:</p>
-
-<ul>
-<li><code>/boot</code> on <code>/dev/sda1</code></li>
-<li><code>/</code> on <code>/dev/sda2</code></li>
-<li>swap on <code>/dev/sda3</code></li>
-</ul>
-
-
-<p>Start from a fresh copy, create a volume from copied snapshot:</p>
-
-<figure class='code'><figcaption><span></span></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class='line-number'>1</span>
-<span class='line-number'>2</span>
-<span class='line-number'>3</span>
-<span class='line-number'>4</span>
-<span class='line-number'>5</span>
-<span class='line-number'>6</span>
-<span class='line-number'>7</span>
-</pre></td><td class='code'><pre><code class='bash'><span class='line'><span class="nv">$ </span><span class="nb">export </span><span class="nv">SNAP</span><span class="o">=</span>snap-8faa63bc
-</span><span class='line'><span class="nv">$ </span>ec2-create-volume --snapshot <span class="k">${</span><span class="nv">SNAP</span><span class="k">}</span> -z <span class="k">${</span><span class="nv">REGION</span><span class="k">}</span>b
-</span><span class='line'>
-</span><span class='line'><span class="c"># This is our source 3-partition image migrated</span>
-</span><span class='line'><span class="nv">$ VOLUME_ID</span><span class="o">=</span>vol-ee146fdc
-</span><span class='line'><span class="nv">$ </span>ec2-describe-volumes <span class="k">${</span><span class="nv">VOLUME_ID</span><span class="k">}</span>
-</span><span class='line'><span class="nv">$ </span>ec2-attach-volume <span class="k">${</span><span class="nv">VOLUME_ID</span><span class="k">}</span> --instance i-55538e69 --device /dev/sdk
-</span></code></pre></td></tr></table></div></figure>
-
-
-<p>Create volume which will be standalone. Note that the volume must not be
-smaller than the original filesystem otherwise <code>partimage</code> will coredump.</p>
-
-<figure class='code'><figcaption><span></span></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class='line-number'>1</span>
-<span class='line-number'>2</span>
-<span class='line-number'>3</span>
-</pre></td><td class='code'><pre><code class='bash'><span class='line'><span class="nv">$ </span>ec2-create-volume -z <span class="k">${</span><span class="nv">ZONE</span><span class="k">}</span> -s 11
-</span><span class='line'><span class="nv">$ VOLUME_ID</span><span class="o">=</span>vol-a3097291 <span class="c"># copy &amp; paste job</span>
-</span><span class='line'><span class="nv">$ </span>ec2-attach-volume <span class="k">${</span><span class="nv">VOLUME_ID</span><span class="k">}</span> --instance i-55538e69 --device /dev/sdl
-</span></code></pre></td></tr></table></div></figure>
-
-
-<h3>Create EBS volume with single filesytem</h3>
-
-<p>On the staging box we export from /dev/sda2 (/xvdo2) to newly minted
-EBS volume.</p>
-
-<p>Dump the root partition to a file using partimage (which is faster than
-doing plain <code>dd</code> as it only copies used blocks in the filesystem)</p>
-
-<figure class='code'><figcaption><span></span></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class='line-number'>1</span>
-<span class='line-number'>2</span>
-<span class='line-number'>3</span>
-<span class='line-number'>4</span>
-<span class='line-number'>5</span>
-<span class='line-number'>6</span>
-<span class='line-number'>7</span>
-<span class='line-number'>8</span>
-<span class='line-number'>9</span>
-<span class='line-number'>10</span>
-<span class='line-number'>11</span>
-<span class='line-number'>12</span>
-<span class='line-number'>13</span>
-<span class='line-number'>14</span>
-</pre></td><td class='code'><pre><code class='bash'><span class='line'>% e2fsck /dev/xvdo2
-</span><span class='line'>% partimage -B<span class="o">=</span>N  -z1 -d save /dev/xvdo2 /tmp/xvdo.partimg.gz -o -m -M
-</span><span class='line'>partimage: status: initializing the operation.
-</span><span class='line'>partimage: status: Saving partition to the image file...
-</span><span class='line'>partimage: status: reading partition properties
-</span><span class='line'>partimage: status: checking the file system with fsck
-</span><span class='line'>partimage: status: writing header
-</span><span class='line'>partimage: status: copying used data blocks
-</span><span class='line'>partimage: status: commiting buffer cache to disk.
-</span><span class='line'>partimage: Success <span class="o">[</span>OK<span class="o">]</span>
-</span><span class='line'>partimage:  Operation successfully finished:
-</span><span class='line'>Time elapsed: 11m:13sec
-</span><span class='line'>Speed: 232.90 MiB/min
-</span><span class='line'>Data copied: 2.55 GiB
-</span></code></pre></td></tr></table></div></figure>
-
-
-<p>Then we copy the image onto new EBS volume.</p>
-
-<figure class='code'><figcaption><span></span></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class='line-number'>1</span>
-<span class='line-number'>2</span>
-<span class='line-number'>3</span>
-<span class='line-number'>4</span>
-<span class='line-number'>5</span>
-<span class='line-number'>6</span>
-<span class='line-number'>7</span>
-</pre></td><td class='code'><pre><code class='bash'><span class='line'>% partimage restore /dev/xvdp /tmp/xvdo.partimg.gz.000 -f3 -B<span class="o">=</span>N
-</span><span class='line'>partimage: status: initializing the operation
-</span><span class='line'>partimage: status: Restoring partition from the image file...
-</span><span class='line'>partimage: status: reading partition informations
-</span><span class='line'>partimage: status: reading header
-</span><span class='line'>partimage: status: copying used data blocks
-</span><span class='line'>partimage: status: commiting buffer cache to disk.
-</span></code></pre></td></tr></table></div></figure>
-
-
-<p>and then prepare the new volume for booting. We need to fix the
-grub menu and fstab.</p>
-
-<figure class='code'><figcaption><span></span></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class='line-number'>1</span>
-<span class='line-number'>2</span>
-<span class='line-number'>3</span>
-<span class='line-number'>4</span>
-<span class='line-number'>5</span>
-<span class='line-number'>6</span>
-<span class='line-number'>7</span>
-<span class='line-number'>8</span>
-<span class='line-number'>9</span>
-<span class='line-number'>10</span>
-<span class='line-number'>11</span>
-<span class='line-number'>12</span>
-<span class='line-number'>13</span>
-<span class='line-number'>14</span>
-<span class='line-number'>15</span>
-<span class='line-number'>16</span>
-<span class='line-number'>17</span>
-<span class='line-number'>18</span>
-<span class='line-number'>19</span>
-<span class='line-number'>20</span>
-<span class='line-number'>21</span>
-<span class='line-number'>22</span>
-<span class='line-number'>23</span>
-</pre></td><td class='code'><pre><code class='bash'><span class='line'><span class="nv">$ </span>mount /dev/xvdp /mnt
-</span><span class='line'><span class="nv">$ </span>cp menu.lst.template /mnt/tmp
-</span><span class='line'><span class="nv">$ </span>sudo chroot /mnt
-</span><span class='line'>% <span class="nb">export </span><span class="nv">version</span><span class="o">=</span>2.6.18-194.0.0.0.3.el5xen
-</span><span class='line'>% cat /tmp/menu.lst.template | sed <span class="s1">&#39;s/${version}/&#39;</span><span class="k">${</span><span class="nv">version</span><span class="k">}</span>/g &gt; /boot/grub/menu.lst
-</span><span class='line'>% cat /boot/grub/menu.lst
-</span><span class='line'>default 0
-</span><span class='line'>timeout 1
-</span><span class='line'>title Test Server
-</span><span class='line'>        root <span class="o">(</span>hd0<span class="o">)</span>
-</span><span class='line'>        kernel /vmlinuz-2.6.18-194.0.0.0.3.el5xen ro <span class="nv">root</span><span class="o">=</span><span class="nv">LABEL</span><span class="o">=</span>/
-</span><span class='line'>        initrd /initrd-2.6.18-194.0.0.0.3.el5xen.img
-</span><span class='line'><span class="c"># /sbin/mkinitrd -f -v  --builtin uhci-hcd --builtin ohci-hcd \</span>
-</span><span class='line'>--builtin ehci-hcd --preload xennet --preload xenblk --preload dm-mod <span class="se">\</span>
-</span><span class='line'>--preload linear /initrd-<span class="k">${</span><span class="nv">version</span><span class="k">}</span>.img <span class="k">${</span><span class="nv">version</span><span class="k">}</span> <span class="se">\</span>
-</span><span class='line'><span class="c"># vi /etc/fstab</span>
-</span><span class='line'>/dev/sda               /                       ext3    defaults        1 1
-</span><span class='line'>tmpfs                   /dev/shm                tmpfs   defaults 0 0
-</span><span class='line'>devpts                  /dev/pts                devpts  <span class="nv">gid</span><span class="o">=</span>5,mode<span class="o">=</span>620 0 0
-</span><span class='line'>sysfs                   /sys                    sysfs   defaults 0 0
-</span><span class='line'>proc                    /proc                   proc    defaults 0 0
-</span><span class='line'><span class="c"># exit</span>
-</span><span class='line'><span class="nv">$ </span>sudo umount /mnt
-</span></code></pre></td></tr></table></div></figure>
-
-
-
-
-<figure class='code'><figcaption><span></span></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class='line-number'>1</span>
-<span class='line-number'>2</span>
-<span class='line-number'>3</span>
-<span class='line-number'>4</span>
-<span class='line-number'>5</span>
-<span class='line-number'>6</span>
-<span class='line-number'>7</span>
-<span class='line-number'>8</span>
-<span class='line-number'>9</span>
-<span class='line-number'>10</span>
-</pre></td><td class='code'><pre><code class='bash'><span class='line'><span class="nv">$ </span>ec2-detach-volume <span class="k">${</span><span class="nv">VOLUME_ID</span><span class="k">}</span>
-</span><span class='line'><span class="nv">$ </span>ec2-create-snapshot <span class="k">${</span><span class="nv">VOLUME_ID</span><span class="k">}</span>
-</span><span class='line'><span class="nv">$ SNAP</span><span class="o">=</span>snap-468d4475
-</span><span class='line'><span class="nv">$ </span>ec2-describe-snapshots <span class="k">${</span><span class="nv">SNAP</span><span class="k">}</span>
-</span><span class='line'><span class="nv">$ </span>ec2-register --name <span class="s2">&quot;Single filesystem image&quot;</span> --architecture x86_64 --kernel aki-31990e0b --root-device-name /dev/sda -s <span class="k">${</span><span class="nv">SNAP</span><span class="k">}</span>
-</span><span class='line'><span class="nv">$ TEST_AMI</span><span class="o">=</span>ami-b1089a8b
-</span><span class='line'><span class="nv">$ </span>ec2-run-instances <span class="k">${</span><span class="nv">TEST_AMI</span><span class="k">}</span>
-</span><span class='line'><span class="nv">$ TEST_I</span><span class="o">=</span>i-6401fb58
-</span><span class='line'><span class="nv">$ </span>ec2-describe-instance-status <span class="k">${</span><span class="nv">TEST_I</span><span class="k">}</span>
-</span><span class='line'><span class="nv">$ </span>ec2-get-console-output <span class="k">${</span><span class="nv">TEST_I</span><span class="k">}</span>
-</span></code></pre></td></tr></table></div></figure>
-
-
-<p>If all is good:</p>
-
-<figure class='code'><figcaption><span></span></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class='line-number'>1</span>
-<span class='line-number'>2</span>
-<span class='line-number'>3</span>
-<span class='line-number'>4</span>
-</pre></td><td class='code'><pre><code class='bash'><span class='line'>Enterprise Linux Enterprise Linux Server release 5.5 <span class="o">(</span>Carthage<span class="o">)</span>
-</span><span class='line'>Kernel 2.6.18-194.0.0.0.3.el5xen on an x86_64
-</span><span class='line'>
-</span><span class='line'>localhost.localdomain login:
-</span></code></pre></td></tr></table></div></figure>
-
-
-<p>Cleanup:</p>
-
-<figure class='code'><figcaption><span></span></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class='line-number'>1</span>
-<span class='line-number'>2</span>
-<span class='line-number'>3</span>
-</pre></td><td class='code'><pre><code class='bash'><span class='line'><span class="nv">$ </span>ec2-terminate-instances  <span class="k">${</span><span class="nv">TEST_I</span><span class="k">}</span>
-</span><span class='line'><span class="nv">$ </span>ec2-deregister <span class="k">${</span><span class="nv">TEST_AMI</span><span class="k">}</span>
-</span><span class='line'><span class="nv">$ </span>ec2-delete-snapshot <span class="k">${</span><span class="nv">SNAP</span><span class="k">}</span>
-</span></code></pre></td></tr></table></div></figure>
-
-
-<h2>Old stuff &ndash; to be cleaned up.</h2>
-
-<p>Describing migration approach</p>
-
-<p>I started two instances in <code>us-east-1</code> as a trial using <code>ami-63d2130a</code> AMI Oracle Linux
-5.5 x86_64. One will be the image we want to migrate, the other is the
-&ldquo;helper&rdquo; box that will be used for the migration.</p>
-
-<figure class='code'><figcaption><span></span></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class='line-number'>1</span>
-<span class='line-number'>2</span>
-<span class='line-number'>3</span>
-</pre></td><td class='code'><pre><code class='bash'><span class='line'><span class="nv">$ </span>mkdir -m 0700 ~/.ssh/aws
-</span><span class='line'><span class="nv">$ </span>cp ~/Downloads/orel-migration-test.pem ~/.ssh/aws
-</span><span class='line'><span class="nv">$ </span>chmod 0600 ~/.ssh/aws/*
-</span></code></pre></td></tr></table></div></figure>
-
-
-<p>add following <code>~/.ssh/config</code> entries.</p>
-
-<figure class='code'><figcaption><span></span></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class='line-number'>1</span>
-<span class='line-number'>2</span>
-<span class='line-number'>3</span>
-<span class='line-number'>4</span>
-<span class='line-number'>5</span>
-<span class='line-number'>6</span>
-<span class='line-number'>7</span>
-<span class='line-number'>8</span>
-<span class='line-number'>9</span>
-<span class='line-number'>10</span>
-<span class='line-number'>11</span>
-<span class='line-number'>12</span>
-<span class='line-number'>13</span>
-</pre></td><td class='code'><pre><code class='bash'><span class='line'><span class="c"># Instance i-585c3f30</span>
-</span><span class='line'>host box-1.source
-</span><span class='line'>  Hostname ec2-184-73-48-11.compute-1.amazonaws.com
-</span><span class='line'>  User root
-</span><span class='line'>  IdentityFile ~/.ssh/aws/orel-migration-test.pem
-</span><span class='line'>  PreferredAuthentications publickey
-</span><span class='line'>
-</span><span class='line'><span class="c"># Instance i-5a5c3f32</span>
-</span><span class='line'>host staging.source
-</span><span class='line'>  Hostname ec2-54-211-116-254.compute-1.amazonaws.com
-</span><span class='line'>  User root
-</span><span class='line'>  IdentityFile ~/.ssh/aws/orel-migration-test.pem
-</span><span class='line'>  PreferredAuthentications publickey
-</span></code></pre></td></tr></table></div></figure>
-
-
-<p>Check connectivity</p>
-
-<figure class='code'><figcaption><span></span></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class='line-number'>1</span>
-<span class='line-number'>2</span>
-<span class='line-number'>3</span>
-<span class='line-number'>4</span>
-<span class='line-number'>5</span>
-<span class='line-number'>6</span>
-</pre></td><td class='code'><pre><code class='bash'><span class='line'><span class="nv">$ </span>ssh box-1.source <span class="nb">echo </span>okay
-</span><span class='line'>...
-</span><span class='line'>okay
-</span><span class='line'><span class="nv">$ </span>ssh staging.source <span class="nb">echo </span>okay
-</span><span class='line'>...
-</span><span class='line'>okay
-</span></code></pre></td></tr></table></div></figure>
-
-
-
+As a workaround, the script will remount the root filesystem read-only,
+trigger ec2 snapshot and then remount as writeable. The issue is that we
+are not handling application consistency correctly (e.g. databases).</p>
 </div>
   
   
@@ -655,7 +186,7 @@ grub menu and fstab.</p>
   <ul id="recent_posts">
     
       <li class="post">
-        <a href="/blog/2013/08/20/migrating-aws-images-between-regions/">Migrating AWS Images Between Regions</a>
+        <a href="/blog/2013/08/20/migrating-aws-images-between-regions/">Migrating a AWS VPC Between Regions - Part 1</a>
       </li>
     
   </ul>
