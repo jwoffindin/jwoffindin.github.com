@@ -60,6 +60,7 @@ commands presented below are likey to destroy your production database, &hellip;
   <li><a href="/">Blog</a></li>
   <li><a href="/blog/archives">Archives</a></li>
   <li><a href="/vim-shortcuts">VIM Shortcuts</a></li>
+  <li><a href="/cv-john-woffindin">My Resume</a></li>
 </ul>
 
 </nav>
@@ -97,32 +98,53 @@ commands presented below are likey to destroy your production database, &hellip;
 commands presented below are likey to destroy your production database,
 so take the following with a large grain of salt</strong></p>
 
-<p>Problem: We have AWS VPC networks running in AWS <em>us-west</em>
-region (about 40 servers across test, uat and production).
-With the opening of a Sydney-based data centre, it makes sense to
-migrate to the new location.</p>
+<p>The following describes the process for migrating AWS-based VPC
+instances from US region to AU and using CloudFormation for
+setting up VPC.</p>
+
+<h2>Background</h2>
 
 <p>Servers are Oracle Enterprise Linux 5.5. The original AMIs are no longer
 provided by Oracle, and there are no corresponding Kernel (AKI)
-or Ramdisk Image (ARI) in the <code>ap-southeast-2</code>, so using AWS EC2 Copy
+or Ramdisk Image (ARI) in the <code>ap-southeast-2</code> region, so using AWS EC2 Copy
 <a href="http://docs.aws.amazon.com/AWSEC2/latest/UserGuide/CopyingAMIs.html">does not work</a>.</p>
 
-<p>Fortunately Sydney supports <a href="http://wiki.xen.org/wiki/PvGrub">pv-grub</a> so I&rsquo;m documenting my feable
-attempts at migrating bootable images across</p>
+<p>Fortunately the target region supports <a href="http://wiki.xen.org/wiki/PvGrub">pv-grub</a> so the migration will
+will also include making migrated server bootable via pv-grub.</p>
+
+<p>So, the plan is to:</p>
+
+<ol>
+<li>Define migration strategy and set up any required infrastructure to
+migrate server instances between regions.</li>
+<li>Write scripts to copy system volumes across and make them bootable in
+the target region. Each server has an unknown set of changes made so
+we must migrate all instances.</li>
+<li>Migrate data volumes into the new region and record sufficient
+information so they are mounted onto the correct target volume. We
+also need to be aware of any application-level consistency problems
+when snapshotting the filesystem.</li>
+<li>Create a CloudFormation template referencing migrated AMIs so
+instances are created in the correct subnets and correct data volumes
+are mounted.</li>
+<li>Boot network and test</li>
+<li>Clean up after ourselves.</li>
+</ol>
+
 
 <h2>Migrating Root Images</h2>
 
-<p>First issue, we can&rsquo;t just snapshot/copy the AMIs because we don&rsquo;t have
-matching AKIs/ARIs at the other end.</p>
+<p>Below is a simple ZSH script which can be used to migrate root EBS
+volumes from one region to another.</p>
 
-<p>There are a <a href="http://www.slideshare.net/pleasebiteme/presentation-migrating-aws-ebs-backed-amis-between-regions">couple of presentations</a> which give an introduction to migrating
-instances between regions. This should allow us to migrate the 40+
-servers to the apac data center.<br/>
-I implemented a basic export/import script that used staging instances.
-The script can be found <a href="git@github.com:jwoffindin/aws-staged-copy.git">here</a></p>
+<div><script src='https://gist.github.com/6373731.js'></script>
+<noscript><pre><code></code></pre></noscript></div>
 
-<p><em>Update</em>: We should just be able to snapshot the EBS root volume and use
-the copy snapshot approach. Will update once I&rsquo;ve tried this.</p>
+
+<p>Creating snapshots is a bit tricky since the OREL 5.5
+systems aren&rsquo;t using LVM and don&rsquo;t support [fsfreeze].
+The script will remount the root filesystem read-only, trigger ec2
+snapshot and then remount as writable.</p>
 
 <h2>Booting Migrated Volumes</h2>
 
