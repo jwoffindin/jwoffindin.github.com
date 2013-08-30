@@ -1,60 +1,47 @@
 ---
 layout: post
-title: "Updating Migrated EBS volume to boot via pv-grub"
+title: "AWS Migration Part 2 : Grubby Booting"
 date: 2013-08-29 16:04
 comments: true
 categories: AWS
 published: false
 ---
 
-## Booting Migrated Volumes
+**Diclaimer: This post is a work in progress. It's disorganised and any
+commands presented below are likey to destroy your production database,
+so take the following with a large grain of salt**
 
-Once we have root EBS snapshots migrated, high-level steps we need to go
-through are:
+This post continuous on from where the [previous] entry left off and
+describes the steps we took to the OREL-based AKI *root* images to boot
+under [pv-grub].
 
-1. Prepare a 'staging' server in the target availability zone
-1. Create a Volume from copied snapshot
-1. Make any requires changes to the file system by mounting it on the
-   staging server
-1. Unmount and snapshot the Volume
+At this point we have a number of EBS *root* and  *data* volume
+snapshots copied into the target region, and a CSV file recording the
+mapping of volumes back to the original instances.
+
+## Steps
+
+The steps we are going to go through are:
+
+1. Preparing a 'staging' server in the target availability zone
+1. Creating a Volume from copied snapshot
+1. Mounting it on the staging server
+1. Make required changes to the file system
+1. Unmount and snapshot the volume
 1. Create an AMI from the snapshot, setting the appropriate
    architecture, and *pv-grub* enabled AKI.
 1. Boot the instance.
 1. Check the console log to see if blows up somewhere along the way
 
 If it fails, then terminate the instance, delete the snapshot and AMI
-that we created in steps 4 onwards.
+that we created in steps 4 onwards, and then repeat.
 
-### Tooling
+## Staging Server
 
-I'm on OS/X using Boxen / Brew to install api/ami tools, but an `apt-get`
-should work just as well. See [AWS Documentation] for the official
-documentation. 
-
-[AWS Documentation]: http://docs.aws.amazon.com/AWSEC2/latest/CommandLineReference/Welcome.html
-
-```bash
-$ sudo apt-get install ec2-api-tools ec2-ami-tools
-$ brew install ec2-api-tools ec2-ami-tools
-```
-
-You will need to setup your AWS credentials for the ec2 tools to work.
-I'm using the following simple shell script to set environment variables
-required:
-
-```bash env.sh
-$ export EC2_CERT=~/.ec2/cert.pem
-$ export EC2_PRIVATE_KEY=~/.ec2/private-key.pem
-$ export JAVA_HOME="$(/usr/libexec/java_home)"
-$ export EC2_HOME="/opt/boxen/homebrew/Library/LinkedKegs/ec2-api-tools/jars"
-```
-
-In addition, also explicitly setting EC2_URL to the *ap-southeast-2*
-endpoint to avoid having to always specify the `--region` parameter.
-
-```bash
-$ export EC2_URL=https://ec2.ap-southeast-2.amazonaws.com/
-```
+As we need to make file-system level changes to the migrated filesystem
+we require a "staging" instance to be running in the target region.
+There are no shrink-wrapped AMIs for OREL so we went with CentOS 5.5 as
+a close approximation.
 
 ### Selecting correct AMI
 
@@ -67,9 +54,9 @@ original author was, apologies!
 For this case (root on `/dev/sda2`, and *ap-southeast-2* region), I will be using:
 
  property       | value
- ---------------|-----------------
- architecture   | `x86_64`
- pv-grub AKI    | `aki-3d990e07`
+----------------|-----------------
+architecture   | `x86_64`
+pv-grub AKI    | `aki-3d990e07`
 
 
 ### Preparing the image
