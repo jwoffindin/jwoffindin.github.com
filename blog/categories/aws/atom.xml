@@ -4,7 +4,7 @@
   <title><![CDATA[Category: AWS | ^memory^blog]]></title>
   <link href="http://jwoffindin.github.io/blog/categories/aws/atom.xml" rel="self"/>
   <link href="http://jwoffindin.github.io/"/>
-  <updated>2013-08-30T16:34:25+12:00</updated>
+  <updated>2013-08-30T16:47:32+12:00</updated>
   <id>http://jwoffindin.github.io/</id>
   <author>
     <name><![CDATA[John Woffindin]]></name>
@@ -387,7 +387,7 @@ a blog and kick the tires of <a href="http://octopress.org/">Octopress</a>.</p>
 <p>We have two VPC networks on AWS with servers split across several
 subnets. OS is Oracle Enterprise Linux 5.5. The original AMIs are no
 longer provided by Oracle, and there are no corresponding Kernel (AKI)
-or Ramdisk Image (ARI) in the <code>ap-southeast-2</code> region, so using AWS EC2
+or Ramdisk Image (ARI) in the <code>ap-southeast-2</code> region, so using AMI
 Copy <a href="http://docs.aws.amazon.com/AWSEC2/latest/UserGuide/CopyingAMIs.html">does not work</a>.</p>
 
 <p>Fortunately the target region supports <a href="http://wiki.xen.org/wiki/PvGrub">pv-grub</a> so the migration will
