@@ -98,8 +98,8 @@ commands presented below are likey to destroy your production database, &hellip;
 commands presented below are likey to destroy your production database,
 so take the following with a large grain of salt</strong></p>
 
-<p>This is first part of a series that describes the process I went through
-migrating AWS-based VPC instances from US region to AU and using
+<p>This is first part of a series that describes the process we are going
+through migrating AWS-based VPC instances from US region to AU and using
 CloudFormation for setting up VPC. It is also an excuse to finally start
 a blog and kick the tires of <a href="http://octopress.org/">Octopress</a>.</p>
 
@@ -109,23 +109,21 @@ a blog and kick the tires of <a href="http://octopress.org/">Octopress</a>.</p>
 subnets. OS is Oracle Enterprise Linux 5.5. The original AMIs are no
 longer provided by Oracle, and there are no corresponding Kernel (AKI)
 or Ramdisk Image (ARI) in the <code>ap-southeast-2</code> region, so using AWS EC2
-Copy [does not work][1].</p>
+Copy <a href="http://docs.aws.amazon.com/AWSEC2/latest/UserGuide/CopyingAMIs.html">does not work</a>.</p>
 
 <p>Fortunately the target region supports <a href="http://wiki.xen.org/wiki/PvGrub">pv-grub</a> so the migration will
 will also include making migrated server bootable via pv-grub.</p>
 
-<p>So, the plan is to:</p>
+<p>So the plan is to:</p>
 
 <ol>
 <li>Write script to copy root and data EBS volumes to the &ldquo;target&rdquo;
 region.</li>
-<li>Update these copied root volumes to make then bootable under pv-grub
-the target region. Each server has an unknown set of changes made so
-we must migrate all instances.</li>
+<li>Update copied root volumes to make then bootable under pv-grub
+the target region.</li>
 <li>Create a CloudFormation template referencing migrated AMIs so
 instances are created in the correct subnets and correct data volumes
-are mounted on the correct hosts.</li>
-<li>Create the server instances using CloudFormation and test</li>
+are mounted on the expected hosts.</li>
 <li>Clean up after ourselves.</li>
 </ol>
 
@@ -133,15 +131,50 @@ are mounted on the correct hosts.</li>
 <p>The first step is straight forward so I&rsquo;ll cover it here. The remaining
 activities will be covered in their own posts.</p>
 
+<h2>Tooling</h2>
+
+<p>For this project I&rsquo;ve used the AWS command-line tools rather than one of
+the SDKs. These tools can be installed using apt-get or brew (if you&rsquo;re
+on OS/X or a Debian child).  See <a href="http://docs.aws.amazon.com/AWSEC2/latest/CommandLineReference/Welcome.html">AWS Documentation</a> installation and
+usage instructions if you&rsquo;ve any problems.</p>
+
+<figure class='code'><figcaption><span></span></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class='line-number'>1</span>
+<span class='line-number'>2</span>
+</pre></td><td class='code'><pre><code class='bash'><span class='line'><span class="nv">$ </span>sudo apt-get install ec2-api-tools ec2-ami-tools
+</span><span class='line'><span class="nv">$ </span>brew install ec2-api-tools ec2-ami-tools
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>You will need to setup your AWS credentials for the ec2 tools to work.
+I&rsquo;m using the following simple shell script to set environment variables
+required:</p>
+
+<figure class='code'><figcaption><span>env.sh</span></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class='line-number'>1</span>
+<span class='line-number'>2</span>
+<span class='line-number'>3</span>
+<span class='line-number'>4</span>
+<span class='line-number'>5</span>
+</pre></td><td class='code'><pre><code class='bash'><span class='line'><span class="nv">$ </span><span class="nb">export </span><span class="nv">EC2_CERT</span><span class="o">=</span>~/.ec2/cert.pem
+</span><span class='line'><span class="nv">$ </span><span class="nb">export </span><span class="nv">EC2_PRIVATE_KEY</span><span class="o">=</span>~/.ec2/private-key.pem
+</span><span class='line'><span class="nv">$ </span><span class="nb">export </span><span class="nv">JAVA_HOME</span><span class="o">=</span><span class="s2">&quot;$(/usr/libexec/java_home)&quot;</span>
+</span><span class='line'><span class="nv">$ </span><span class="nb">export </span><span class="nv">EC2_HOME</span><span class="o">=</span><span class="s2">&quot;/opt/boxen/homebrew/Library/LinkedKegs/ec2-api-tools/jars&quot;</span>
+</span><span class='line'><span class="nv">$ </span><span class="nb">export </span><span class="nv">EC2_URL</span><span class="o">=</span>https://ec2.ap-southeast-2.amazonaws.com/
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Note that I&rsquo;ve explicitly set EC2_URL to avoid having to always specify
+<code>--region ap-southeast-2</code> on every command.</p>
+
 <h2>Migrating Root Images</h2>
 
-<p>Each of the instances has two EBS volumes &ndash; a <em>system</em> EBS volume
-(containing the root and boot partitions) and a <em>data</em> volume. The
-system volume is a disk image with 3 parititons:</p>
+<p>Each server instance mounts two EBS volumes &ndash; a <em>system</em> EBS volume
+(containing the root and boot partitions) and a <em>data</em> volume.</p>
+
+<p>The system volume is a 3 partition disk image:</p>
 
 <ul>
 <li><code>/dev/sda1</code> &ndash; the <code>/boot</code> volume</li>
-<li><code>/dev/sda1</code> &ndash; the root volume (mounted as &lsquo;/&rsquo;)</li>
+<li><code>/dev/sda2</code> &ndash; the root volume (mounted as &lsquo;/&rsquo;)</li>
 <li><code>/dev/sda3</code> &ndash; swap (more on this one later)</li>
 </ul>
 
