@@ -5,7 +5,7 @@
 <!--[if (gt IE 8)|(gt IEMobile 7)|!(IEMobile)|!(IE)]><!--><html class="no-js" lang="en"><!--<![endif]-->
 <head>
   <meta charset="utf-8">
-  <title>^memory^blog</title>
+  <title>AWS Migration Part 2 : Grubby Booting - ^memory^blog</title>
   <meta name="author" content="John Woffindin">
 
   
@@ -19,7 +19,7 @@ commands presented below are likey to destroy your production database, &hellip;
   <meta name="viewport" content="width=device-width, initial-scale=1">
 
   
-  <link rel="canonical" href="http://jwoffindin.github.io">
+  <link rel="canonical" href="http://jwoffindin.github.io/blog/2013/08/29/updating-migrated-ebs-volume-to-boot-via-pv-grub">
   <link href="/favicon.png" rel="icon">
   <link href="/stylesheets/screen.css" media="screen, projection" rel="stylesheet" type="text/css">
   <link href="/atom.xml" rel="alternate" title="^memory^blog" type="application/atom+xml">
@@ -66,15 +66,12 @@ commands presented below are likey to destroy your production database, &hellip;
 </nav>
   <div id="main">
     <div id="content">
-      <div class="blog-index">
+      <div>
+<article class="hentry" role="article">
   
-  
-  
-    <article>
-      
   <header>
     
-      <h1 class="entry-title"><a href="/blog/2013/08/29/updating-migrated-ebs-volume-to-boot-via-pv-grub/">AWS Migration Part 2 : Grubby Booting</a></h1>
+      <h1 class="entry-title">AWS Migration Part 2 : Grubby Booting</h1>
     
     
       <p class="meta">
@@ -97,7 +94,7 @@ commands presented below are likey to destroy your production database, &hellip;
   </header>
 
 
-  <div class="entry-content"><p><strong>Diclaimer: This post is a work in progress. It&rsquo;s disorganised and any
+<div class="entry-content"><p><strong>Diclaimer: This post is a work in progress. It&rsquo;s disorganised and any
 commands presented below are likey to destroy your production database,
 so take the following with a large grain of salt</strong></p>
 
@@ -566,22 +563,16 @@ grub menu and fstab.</p>
 
 
 </div>
-  
-  
 
 
-    </article>
-  
-  
-    <article>
+  <footer>
+    <p class="meta">
       
-  <header>
-    
-      <h1 class="entry-title"><a href="/blog/2013/08/20/migrating-aws-images-between-regions/">Migrating a AWS VPC Between Regions - Part 1</a></h1>
-    
-    
-      <p class="meta">
-        
+  
+
+<span class="byline author vcard">Posted by <span class="fn">John Woffindin</span></span>
+
+      
 
 
 
@@ -593,128 +584,38 @@ grub menu and fstab.</p>
   
 
 
-<time datetime="2013-08-20T10:10:00+12:00" pubdate data-updated="true">Aug 20<span>th</span>, 2013</time>
-        
-      </p>
+<time datetime="2013-08-29T16:04:00+12:00" pubdate data-updated="true">Aug 29<span>th</span>, 2013</time>
+      
+
+<span class="categories">
+  
+    <a class='category' href='/blog/categories/aws/'>AWS</a>
+  
+</span>
+
+
+    </p>
     
-  </header>
-
-
-  <div class="entry-content"><p><strong>Diclaimer: This post is a work in progress. It&rsquo;s disorganised and any
-commands presented below are likey to destroy your production database,
-so take the following with a large grain of salt</strong></p>
-
-<p>This is first part of a series that describes the process we are going
-through migrating AWS-based VPC instances from US region to AU and using
-CloudFormation for setting up VPC. It is also an excuse to finally start
-a blog and kick the tires of <a href="http://octopress.org/">Octopress</a>.</p>
-
-<h2>Background</h2>
-
-<p>We have two VPC networks on AWS with servers split across several
-subnets. OS is Oracle Enterprise Linux 5.5. The original AMIs are no
-longer provided by Oracle, and there are no corresponding Kernel (AKI)
-or Ramdisk Image (ARI) in the <code>ap-southeast-2</code> region, so using AWS EC2
-Copy <a href="http://docs.aws.amazon.com/AWSEC2/latest/UserGuide/CopyingAMIs.html">does not work</a>.</p>
-
-<p>Fortunately the target region supports <a href="http://wiki.xen.org/wiki/PvGrub">pv-grub</a> so the migration will
-will also include making migrated server bootable via pv-grub.</p>
-
-<p>So the plan is to:</p>
-
-<ol>
-<li>Write script to copy root and data EBS volumes to the &ldquo;target&rdquo;
-region.</li>
-<li>Update copied root volumes to make then bootable under pv-grub
-the target region.</li>
-<li>Create a CloudFormation template referencing migrated AMIs so
-instances are created in the correct subnets and correct data volumes
-are mounted on the expected hosts.</li>
-<li>Clean up after ourselves.</li>
-</ol>
-
-
-<p>The first step is straight forward so I&rsquo;ll cover it here. The remaining
-activities will be covered in their own posts.</p>
-
-<h2>Tooling</h2>
-
-<p>For this project I&rsquo;ve used the AWS command-line tools rather than one of
-the SDKs. These tools can be installed using apt-get or brew (if you&rsquo;re
-on OS/X or a Debian child).  See <a href="http://docs.aws.amazon.com/AWSEC2/latest/CommandLineReference/Welcome.html">AWS Documentation</a> installation and
-usage instructions if you&rsquo;ve any problems.</p>
-
-<figure class='code'><figcaption><span></span></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class='line-number'>1</span>
-<span class='line-number'>2</span>
-</pre></td><td class='code'><pre><code class='bash'><span class='line'><span class="nv">$ </span>sudo apt-get install ec2-api-tools ec2-ami-tools
-</span><span class='line'><span class="nv">$ </span>brew install ec2-api-tools ec2-ami-tools
-</span></code></pre></td></tr></table></div></figure>
-
-
-<p>You will need to setup your AWS credentials for the ec2 tools to work.
-I&rsquo;m using the following simple shell script to set environment variables
-required:</p>
-
-<figure class='code'><figcaption><span>env.sh</span></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class='line-number'>1</span>
-<span class='line-number'>2</span>
-<span class='line-number'>3</span>
-<span class='line-number'>4</span>
-<span class='line-number'>5</span>
-</pre></td><td class='code'><pre><code class='bash'><span class='line'><span class="nv">$ </span><span class="nb">export </span><span class="nv">EC2_CERT</span><span class="o">=</span>~/.ec2/cert.pem
-</span><span class='line'><span class="nv">$ </span><span class="nb">export </span><span class="nv">EC2_PRIVATE_KEY</span><span class="o">=</span>~/.ec2/private-key.pem
-</span><span class='line'><span class="nv">$ </span><span class="nb">export </span><span class="nv">JAVA_HOME</span><span class="o">=</span><span class="s2">&quot;$(/usr/libexec/java_home)&quot;</span>
-</span><span class='line'><span class="nv">$ </span><span class="nb">export </span><span class="nv">EC2_HOME</span><span class="o">=</span><span class="s2">&quot;/opt/boxen/homebrew/Library/LinkedKegs/ec2-api-tools/jars&quot;</span>
-</span><span class='line'><span class="nv">$ </span><span class="nb">export </span><span class="nv">EC2_URL</span><span class="o">=</span>https://ec2.ap-southeast-2.amazonaws.com/
-</span></code></pre></td></tr></table></div></figure>
-
-
-<p>Note that I&rsquo;ve explicitly set EC2_URL to avoid having to always specify
-<code>--region ap-southeast-2</code> on every command.</p>
-
-<h2>Migrating Root Images</h2>
-
-<p>Each server instance mounts two EBS volumes &ndash; a <em>system</em> EBS volume
-(containing the root and boot partitions) and a <em>data</em> volume.</p>
-
-<p>The system volume is a 3 partition disk image:</p>
-
-<ul>
-<li><code>/dev/sda1</code> &ndash; the <code>/boot</code> volume</li>
-<li><code>/dev/sda2</code> &ndash; the root volume (mounted as &lsquo;/&rsquo;)</li>
-<li><code>/dev/sda3</code> &ndash; swap (more on this one later)</li>
-</ul>
-
-
-<p>Below is a simple ZSH script I wrote to migrate root EBS
-volumes from one region to another. It sputs out a CSV file
-which we&rsquo;ll need later to correlate the migrated instances against the
-original instance ids.</p>
-
-<div><script src='https://gist.github.com/6373731.js'></script>
-<noscript><pre><code></code></pre></noscript></div>
-
-
-<p>The current version only migrates the root images, will update later
-with something a bit smarter.</p>
-
-<p>Note that snapshotting the filesystems is a bit tricky since the OREL 5.5
-systems aren&rsquo;t using LVM and don&rsquo;t support [fsfreeze].
-As a workaround, the script will remount the root filesystem read-only,
-trigger ec2 snapshot and then remount as writeable. The issue is that we
-are not handling application consistency correctly (e.g. databases).</p>
+      <div class="sharing">
+  
+  <a href="//twitter.com/share" class="twitter-share-button" data-url="http://jwoffindin.github.io/blog/2013/08/29/updating-migrated-ebs-volume-to-boot-via-pv-grub/" data-via="john_woffindin" data-counturl="http://jwoffindin.github.io/blog/2013/08/29/updating-migrated-ebs-volume-to-boot-via-pv-grub/" >Tweet</a>
+  
+  
+  
 </div>
-  
-  
 
+    
+    <p class="meta">
+      
+        <a class="basic-alignment left" href="/blog/2013/08/20/migrating-aws-images-between-regions/" title="Previous Post: Migrating a AWS VPC between regions - part 1">&laquo; Migrating a AWS VPC between regions - part 1</a>
+      
+      
+    </p>
+  </footer>
+</article>
 
-    </article>
-  
-  <div class="pagination">
-    
-    <a href="/blog/archives">Blog Archives</a>
-    
-  </div>
 </div>
+
 <aside class="sidebar">
   
     <section>
@@ -735,7 +636,7 @@ are not handling application consistency correctly (e.g. databases).</p>
 <section>
   <h1>GitHub Repos</h1>
   <ul id="gh_repos">
-    <li class="loading">Status updating&#8230;</li>
+    <li class="loading">Status updating...</li>
   </ul>
   
   <a href="https://github.com/jwoffindin">@jwoffindin</a> on GitHub
@@ -776,6 +677,7 @@ are not handling application consistency correctly (e.g. databases).</p>
 
   
 </aside>
+
 
     </div>
   </div>
